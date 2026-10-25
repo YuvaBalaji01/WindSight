@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.coveragerc
+
+# mypy / pyright
+.mypy_cache/
+.pyright/
+
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn/
+
+# Vite / React build artifacts
+frontend/dist/
+frontend/.vite/
+
+# Environment secrets
+*.env
+!.env.example
+*.env.local
+*.env.production
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# Data cache (large fetched datasets – not secrets, but not source code)
+backend/cache/
+backend/data/*.json
+
+# Docker
+*.log
+backend/test_output.txt
+
+# Misc
+*.tmp
+*.bak

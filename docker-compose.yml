@@ -1,0 +1,53 @@
+# WindSight UK – docker-compose
+#
+# Usage
+# ─────
+#   docker compose up --build          # first run (builds images)
+#   docker compose up -d               # detached (subsequent runs)
+#   docker compose down                # stop
+#   docker compose down -v             # stop + remove volumes
+
+services:
+
+  # ── Backend: FastAPI + Uvicorn ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: windsight_backend
+    restart: unless-stopped
+    environment:
+      # Allow the frontend container to reach the backend
+      CORS_ORIGINS: "http://localhost,http://localhost:80,http://frontend"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist the Elexon API cache so it survives container restarts
+      - backend_cache:/app/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ── Frontend: React (Vite) built + served by nginx ─────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Point the frontend at the backend; change to your server's IP/hostname
+        # for remote deployments.
+        VITE_API_BASE_URL: "http://localhost:8000"
+    container_name: windsight_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  backend_cache:
+    driver: local
