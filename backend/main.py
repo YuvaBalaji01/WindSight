@@ -45,17 +45,25 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
-_raw_origins = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
-_allowed_origins: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+allowed_origins = [
+    "http://localhost:5173",
+    "https://wind-sight-blush.vercel.app",
+]
+
+extra_origins = os.getenv("FRONTEND_ORIGINS", "")
+allowed_origins.extend(
+    origin.strip().rstrip("/")
+    for origin in extra_origins.split(",")
+    if origin.strip()
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET"],
+    allow_origins=list(set(allowed_origins)),
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
