@@ -1,343 +1,200 @@
-# WindSight UK 💨
+# WindSight UK
 
-**Wind Generation Forecast Accuracy Dashboard for UK Electricity Procurement**
+**Wind generation forecast accuracy dashboard for UK day-ahead electricity procurement.**
 
-A full-stack analytics platform that measures day-ahead wind forecast accuracy using
-real data from Elexon BMRS — comparing WINDFOR (hourly wind generation forecasts)
-against FUELHH (half-hourly actual fuel-mix generation) for January 2026.
+WindSight helps a day-ahead power buying team answer two questions:
 
----
+1. **What was the latest wind forecast available at the moment the purchase decision had to be made?**
+2. **How accurate are those forecasts, quantitatively?** (MAE, RMSE, bias, MAPE, lead time, data coverage)
 
-## Table of Contents
-
-1. [Architecture Overview](#architecture-overview)
-2. [Design Decisions](#design-decisions)
-3. [Quick Start — Local Development](#quick-start--local-development)
-4. [Docker Deployment](#docker-deployment)
-5. [API Reference](#api-reference)
-6. [Running Tests](#running-tests)
-7. [Project Structure](#project-structure)
+It compares Elexon **WINDFOR** (wind forecasts) against **FUELHH** (actual wind generation, `fuelType=WIND`) at national level for **January 2026**. No other data is used.
 
 ---
 
-## Architecture Overview
+## Links
+
+| Item | URL |
+|---|---|
+| Live app (Vercel frontend) | https://wind-sight-7zxp.vercel.app/ |
+| Backend API (health check) | `<BACKEND_URL>/api/health` ← replace with your deployed backend URL |
+| Demo video | https://drive.google.com/file/d/1Dv1GXEfMYnPMV3giywHJQzgZzerJIHt7/view?usp=sharing |
+
+---
+
+## AI tools disclosure
+
+AI tools (OpenAI Codex) were used to assist with reviewing and modifying the code and documentation. All logic, assumptions and results were reviewed by the author.
+
+---
+
+## Repository layout
 
 ```
-┌─────────────────────┐        HTTP/JSON        ┌────────────────────────────┐
-│  React Frontend      │  ◄──────────────────►  │  FastAPI Backend           │
-│  (Vite + Recharts)   │                         │  (Python 3.12 + Uvicorn)   │
-│  port 5173 (dev)     │                         │  port 8000                 │
-│  port 80   (Docker)  │                         │                            │
-└─────────────────────┘                         │  ┌─────────────────────┐   │
-                                                 │  │   analytics.py      │   │
-                              Elexon BMRS API    │  │  (pure-Python, no   │   │
-                              ──────────────►    │  │   pandas/numpy)     │   │
-                              FUELHH  / WINDFOR  │  └─────────────────────┘   │
-                                                 │  ┌─────────────────────┐   │
-                                                 │  │   backend/cache/    │   │
-                                                 │  │   (JSON disk cache) │   │
-                                                 │  └─────────────────────┘   │
-                                                 └────────────────────────────┘
+.
+├── docker-compose.yml        # Runs backend + frontend together
+├── README.md
+├── backend/                  # Python (FastAPI)
+│   ├── Dockerfile
+│   ├── requirements.txt      # runtime dependencies
+│   ├── requirements-dev.txt  # test dependencies (pytest)
+│   ├── pytest.ini
+│   ├── main.py               # App setup, CORS, health + overview endpoints
+│   ├── routes.py             # Accuracy API endpoints, in-memory result cache
+│   ├── ingestion.py          # Elexon BMRS client, validation, de-duplication, JSON file cache
+│   ├── analytics.py          # Alignment, cutoff logic, forecast selection, metrics
+│   └── tests/
+│       └── test_analytics.py # 28 unit tests for the analytics engine
+└── frontend/                 # React (Vite + Recharts)
+    ├── Dockerfile            # Vite build, served by nginx
+    ├── nginx.conf
+    ├── package.json
+    ├── vite.config.js
+    ├── .env.example          # VITE_API_BASE_URL
+    └── src/
+        ├── main.jsx
+        ├── App.jsx           # Dashboard UI (simple + detailed views, charts, table, CSV export)
+        ├── api.js            # API client
+        ├── index.css
+        └── App.css
 ```
 
 ---
 
-## Design Decisions
+## How the analysis works
 
-### 1. Granularity Alignment (FUELHH → hourly actuals)
+### Data
 
-FUELHH provides **30-minute** half-hourly generation readings (MW).  
-WINDFOR provides **hourly** forecast generation readings (MW).
+| Dataset | Used for | Fields |
+|---|---|---|
+| FUELHH (`fuelType=WIND`) | Actual generation, 30-minute resolution | `startTime`, `generation` |
+| WINDFOR | Forecast generation | `startTime`, `publishTime`, `generation` |
 
-To compare on the same axis both the 00:00 and 00:30 half-hours are averaged
-into a single hourly MW figure. This is correct because MW is an instantaneous
-rate, not cumulative energy — the arithmetic mean of two half-hour MW readings
-gives the representative MW for that hour.
+Scope: delivery hours from **2026-01-01 00:00 UTC to 2026-01-31 23:00 UTC**. WINDFOR publications are fetched from 2025-12-25 so that day-ahead forecasts for early-January delivery are available.
 
-### 2. Day-ahead Decision Cutoff — 11:00 UTC
+### Decision rule (what the buyer could have seen)
 
-The application uses an explicit assumed decision cutoff of 11:00 UTC on the
-previous calendar day. This modeling rule has not been validated against a
-specific procurement auction or buyer contract. January is GMT, so:
+For every delivery hour, the app picks the **latest WINDFOR publication with `publishTime` ≤ 11:00 UTC on the previous day**. That is the forecast a buyer would have had when placing the day-ahead order.
 
 ```
-cutoff(delivery_date) = (delivery_date − 1 day) at 11:00 UTC
+cutoff(delivery) = (delivery date − 1 day) at 11:00 UTC      # January is GMT, so UTC = UK time
 ```
 
-Example: for delivery on `2026-01-15 14:00 UTC`, the cutoff is `2026-01-14 11:00 UTC`.
+> The 11:00 UTC cutoff is an **explicit modelling assumption**, not a validated rule for a specific market or contract. It is a single constant (`CUTOFF_HOUR_UTC` in `backend/analytics.py`) and should be confirmed with the client.
 
-Only WINDFOR publications with `publishTime ≤ cutoff` are eligible. The **latest**
-such publication is selected (most up-to-date information the buyer had).
+### Granularity alignment
 
-### 3. Error Convention
+FUELHH is half-hourly; the forecast is compared at hourly level. The two half-hour readings in an hour are averaged (MW is a rate, so the mean is the hourly MW). **Hours with only one half-hour present are excluded** and counted as missing, not silently filled.
+
+### Error convention and metrics
 
 ```
 error_mw = forecast_mw − actual_mw
 ```
-- Positive → overforecast (forecast exceeded actual generation)
-- Negative → underforecast (forecast underestimated actual generation)
 
-### 4. Lead-time Bands
+Positive means over-forecast, negative means under-forecast.
 
-| Band | Lead Time |
-|------|-----------|
-| ~24h | ≥ 20 h before delivery |
-| ~12h | 10 – 20 h before delivery |
+| Metric | Meaning |
+|---|---|
+| MAE | Average absolute error (MW) |
+| RMSE | Error size with large misses weighted more heavily (MW) |
+| Bias | Average signed error (MW); persistent over/under-forecasting |
+| MAPE | Average absolute % error; **hours with zero actual generation are excluded** and the number used is reported (`n_mape`) |
+| Coverage | Matched hours vs expected hours, plus counts of missing actuals and missing forecasts |
 
-The selected day-ahead forecast cannot be less than 10 hours ahead of delivery
-under this cutoff. These groups compare lead times of selected forecasts; they
-are not fixed-lead comparisons and do not measure later intraday forecast accuracy.
+### Lead-time bands
 
-### 5. MAPE — Zero Actual Exclusion
-
-MAPE is undefined when `actual_mw = 0`. Such intervals are excluded from MAPE
-and the excluded count is reported in `n_mape`.
-
-### 6. Caching Strategy
-
-Elexon API responses are cached to `backend/cache/*.json` to avoid re-fetching
-~31 days of 30-min data on every request. Cache is bypassed with `?refresh=true`.
-In Docker, the cache is mounted as a named volume so it persists across container
-restarts.
+Lead time = delivery hour − publish time. Because of the cutoff, selected forecasts are always at least ~10 hours ahead. Two bands are reported: `≥20h` and `10–20h`. These describe the forecast that was selected under the cutoff rule. They are **not** a fixed-horizon forecast comparison.
 
 ---
 
-## Quick Start — Local Development
+## Running the application
 
-### Prerequisites
-
-- Python 3.11+ with `venv`
-- Node 20+
-
-### Backend
-
-```bash
-cd backend
-
-# Create & activate virtual environment
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start API server (auto-reload on code changes)
-uvicorn main:app --reload --port 8000
-```
-
-> **First run:** On the first API call the backend fetches ~31 days of FUELHH
-> and WINDFOR records from Elexon BMRS (~20–60 seconds). Subsequent calls use
-> the file cache and respond in milliseconds.
-
-Open `http://localhost:8000/docs` for the interactive Swagger UI.
-
-### Frontend
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-Open `http://localhost:5173` to view the dashboard.
-
----
-
-## Docker Deployment
-
-### Build and start all services
+### Option 1: Docker (recommended)
 
 ```bash
 docker compose up --build
 ```
 
-- Frontend: `http://localhost` (port 80)
-- Backend API: `http://localhost:8000`
-- Swagger docs: `http://localhost:8000/docs`
+- Frontend: http://localhost
+- Backend API: http://localhost:8000
+- Swagger docs: http://localhost:8000/docs
 
-### Subsequent starts (images already built)
+Stop with `docker compose down` (add `-v` to also delete the cached Elexon data volume).
 
-```bash
-docker compose up -d
-```
+### Option 2: Local development
 
-### Stop
-
-```bash
-docker compose down          # stop containers, keep volumes
-docker compose down -v       # stop + remove volumes (clears cache)
-```
-
-### Remote deployment
-
-Change `VITE_API_BASE_URL` in `docker-compose.yml` to your server's public IP
-or hostname before building:
-
-```yaml
-args:
-  VITE_API_BASE_URL: "https://api.your-domain.com"
-```
-
----
-
-## API Reference
-
-All endpoints are read-only (`GET`).
-
-### `GET /api/health`
-Returns `{"status": "healthy"}` for liveness checks.
-
-### `GET /api/overview`
-Project metadata, cutoff policy, and endpoint index.
-
-### `GET /api/forecast-accuracy/summary`
-
-Monthly summary metrics + coverage.
-
-| Query param | Default | Description |
-|---|---|---|
-| `from` | `2026-01-01` | Start date (YYYY-MM-DD), inclusive |
-| `to` | `2026-01-31` | End date (YYYY-MM-DD), inclusive |
-| `refresh` | `false` | Force re-fetch from Elexon API |
-
-The API calculates metrics from the Elexon records available to the backend;
-it does not use canned sample metrics. Coverage includes matched, expected,
-missing actual, and missing forecast counts.
-
-### `GET /api/forecast-accuracy`
-
-Per-interval detail for a single delivery date.
-
-| Query param | Required | Description |
-|---|---|---|
-| `date` | ✅ | Delivery date (YYYY-MM-DD) |
-| `refresh` | ❌ | Force re-fetch |
-
-### `GET /api/forecast-accuracy/lead-times`
-
-Accuracy metrics broken down by lead-time band.
-
-| Query param | Default | Description |
-|---|---|---|
-| `from` | `2026-01-01` | Start date |
-| `to` | `2026-01-31` | End date |
-| `refresh` | `false` | Force re-fetch |
-
----
-
-## Running Tests
+**Backend** (Python 3.11+)
 
 ```bash
 cd backend
-# Activate venv first (see Quick Start)
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+**Frontend** (Node 20+)
+
+```bash
+cd frontend
+cp .env.example .env.local      # VITE_API_BASE_URL=http://localhost:8000
+npm ci
+npm run dev
+```
+
+Open http://localhost:5173.
+
+> **First request is slow.** On first use the backend downloads January data from Elexon (roughly 20 to 60 seconds). Results are then cached to `backend/cache/` and in memory. On hosts with an ephemeral filesystem the cache is lost on restart, so the first request after a cold start is slow again.
+
+### Tests
+
+```bash
+cd backend
 pip install -r requirements-dev.txt
-pytest -v
+python -m pytest -v
 ```
 
-All 28 unit tests cover:
-- `build_hourly_actuals` — aggregation, edge-cases, malformed records
-- `cutoff_for_delivery` — standard days, midnight, month boundaries
-- `select_forecasts` — cutoff filtering, latest-selection, lead-time calc
-- `compute_metrics` — MAE, RMSE, bias, MAPE, zero-actual exclusion
-- `match_records` — full/partial match, study-period exclusion
-- `compute_lead_time_metrics` — band assignment and empty datasets
+28 unit tests cover hourly aggregation, cutoff calculation, forecast selection, all metrics (including the zero-actual MAPE rule), record matching and lead-time bands.
 
 ---
 
-## Project Structure
+## API reference
 
-```
-Gridbricks assn/
-├── docker-compose.yml          # Orchestrates backend + frontend
-│
-├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── requirements-dev.txt
-│   ├── main.py                 # FastAPI app, CORS, entry point
-│   ├── routes.py               # API route definitions
-│   ├── ingestion.py            # Elexon BMRS API client + caching
-│   ├── analytics.py            # Core analytics engine (pure Python)
-│   ├── pytest.ini
-│   ├── tests/
-│   │   └── test_analytics.py   # 26 unit tests
-│   └── cache/                  # Auto-created JSON cache (git-ignored)
-│
-└── frontend/
-    ├── Dockerfile              # Two-stage: Vite build → nginx
-    ├── nginx.conf              # SPA routing + cache headers
-    ├── package.json
-    ├── vite.config.js
-    └── src/
-        ├── main.jsx
-        ├── App.jsx             # Dashboard UI components
-        ├── api.js              # Typed API client
-        ├── index.css           # Dark theme design system
-        └── App.css
+All endpoints are `GET`. Dates are `YYYY-MM-DD` and must fall within January 2026.
 
-See [SUBMISSION_GUIDE.md](SUBMISSION_GUIDE.md) for recording prompts and the
-remaining publication and verification steps.
-```
-
----
-
-## Data Sources
-
-| Dataset | Endpoint | Description |
+| Endpoint | Parameters | Returns |
 |---|---|---|
-| **FUELHH** | [`GET /datasets/FUELHH/stream`](https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/FUELHH/stream) | Half-hourly actual fuel-mix generation (MW), filtered with `fuelType=WIND`; uses `startTime` and `generation` |
-| **WINDFOR** | [`GET /datasets/WINDFOR/stream`](https://bmrs.elexon.co.uk/api-documentation/endpoint/datasets/WINDFOR/stream) | Wind generation forecasts (MW); queries `publishDateTimeFrom` / `publishDateTimeTo`; uses `startTime`, `publishTime`, and `generation` |
+| `/api/health` | none | `{"status": "healthy"}` |
+| `/api/overview` | none | Dataset names, period, cutoff policy, endpoint index |
+| `/api/forecast-accuracy/summary` | `from`, `to`, `refresh` | Overall MAE/RMSE/bias/MAPE and coverage for the range |
+| `/api/forecast-accuracy` | `date` (required), `refresh` | Per-hour forecast, actual, error, publish time, lead time for one delivery day |
+| `/api/forecast-accuracy/lead-times` | `from`, `to`, `refresh` | Metrics per lead-time band |
 
-Both datasets are sourced from the **Elexon BMRS REST API** (Balancing Mechanism Reporting Service), the authoritative source for UK electricity settlement and system data.
+`refresh=true` forces a re-fetch from Elexon instead of using the cache.
 
-Study period: **January 2026 (2026-01-01 → 2026-01-31 UTC)**
+---
 
-## Environment variables
+## Configuration
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `VITE_API_BASE_URL` | Frontend build | Absolute backend API URL. Defaults to `http://localhost:8000` only in Vite development. Required for a separate production frontend. |
-| `CORS_ORIGINS` | Backend runtime | Comma-separated allowed browser origins. Defaults to `http://localhost:5173`; Compose configures local origins. |
+| `VITE_API_BASE_URL` | Frontend (build time) | Backend URL. Defaults to `http://localhost:8000` in dev. Required for a deployed frontend. |
+| `FRONTEND_ORIGINS` | Backend (runtime) | Comma-separated extra browser origins allowed by CORS (for example your Vercel URL). |
 
-No Elexon credentials are required. Do not add secrets to Vite variables; they
-are embedded in browser assets.
+No Elexon credentials or secrets are needed.
 
-## Limitations and submission status
+---
 
-- The dashboard evaluates the latest WINDFOR publication available at the
-  configured previous-day cutoff. It does not evaluate later intraday vintages
-  or fixed lead-time snapshots.
-- FUELHH half-hour values are averaged to hourly mean MW only when both
-  half-hours are present. Incomplete hours are excluded and counted as missing.
-- Cached January records are included in this workspace for repeatable local
-  review. A deployment without the cache needs network access to Elexon.
-- No public deployment URL, public GitHub URL, or YouTube URL is configured or
-  verified. Do not submit placeholder links.
-- No screenshot has been captured for this README.
-- AI disclosure: OpenAI Codex was used to review and modify the code and
-  documentation. The project owner should confirm this wording is complete.
+## Deployment
 
-### Deployment configuration
+- **Frontend:** Vercel, project root `frontend/`, with `VITE_API_BASE_URL` set to the backend's HTTPS URL.
+- **Backend:** FastAPI service, start command `uvicorn main:app --host 0.0.0.0 --port $PORT` from `backend/`. It needs outbound access to `data.elexon.co.uk`, and `FRONTEND_ORIGINS` must include the frontend origin.
 
-Only local Docker configuration is present. The project has no Vercel or
-Heroku deployment configuration. Deploy the frontend and FastAPI backend to
-public services, set `VITE_API_BASE_URL` to the backend URL at frontend build
-time, and configure backend `CORS_ORIGINS` with the public frontend origin.
-Then verify both URLs and API-backed January results in a private browser
-session, and add the verified URLs here.
+---
 
-### Demo recording checklist
+## Limitations
 
-Record one unlisted YouTube video of at most 10 minutes with two sections:
-
-1. Client presentation (up to 5 minutes): procurement context, dashboard,
-   forecast versus actuals, metrics, coverage, and limitations.
-2. Technical review (up to 5 minutes): architecture, Elexon endpoints and
-   cutoff selection, analytics/tests, Docker, and deployment status. Show only
-   deployment details that have been verified.
-
-Upload as **Unlisted**, verify the link in a signed-out/private browser, and
-enter it in the submission form. The Microsoft form has not been submitted.
+- Evaluates the latest forecast available at the assumed previous-day cutoff only. It does not evaluate later intraday forecast updates or fixed-horizon forecasts.
+- The cutoff time is an assumption to be validated with the buyer.
+- Scope is national wind only, January 2026 delivery days, from Elexon data alone.
+- Accuracy metrics describe past performance and do not guarantee future forecast error.
