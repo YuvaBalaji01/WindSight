@@ -16,7 +16,7 @@ It compares Elexon **WINDFOR** (wind forecasts) against **FUELHH** (actual wind 
 | Item | URL |
 |---|---|
 | Live app (Vercel frontend) | https://wind-sight-7zxp.vercel.app/ |
-| Backend API (health check) | `<BACKEND_URL>/api/health` ← replace with your deployed backend URL |
+| Backend API (health check) | `https://windsight.onrender.com/api/health` ← replace with your deployed backend URL |
 | Demo video | https://drive.google.com/file/d/1Dv1GXEfMYnPMV3giywHJQzgZzerJIHt7/view?usp=sharing |
 
 ---
