@@ -48,6 +48,7 @@ app = FastAPI(
 allowed_origins = [
     "http://localhost:5173",
     "https://wind-sight-blush.vercel.app",
+    "https://wind-sight-git-main-yuvabalaji01s-projects.vercel.app",
 ]
 
 extra_origins = os.getenv("FRONTEND_ORIGINS", "")
